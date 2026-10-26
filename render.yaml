@@ -1,0 +1,29 @@
+# Public inspection preview only. No paid service, disk, or payment processing.
+services:
+  - type: web
+    name: leafivo-preview
+    branch: codex/leafivo-public-preview
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "3001"
+      - key: STORE_NAME
+        value: Leafivo
+      - key: STORE_MODE
+        value: preview
+      - key: PUBLIC_PREVIEW
+        value: "true"
+      - key: DATABASE_PATH
+        value: /app/.data/store.sqlite
+      - key: DOWNLOAD_DIR
+        value: /app/private-downloads
+      - key: STRIPE_SECRET_KEY
+        value: ""
+      - key: STRIPE_WEBHOOK_SECRET
+        value: ""
