@@ -1,4 +1,15 @@
 import { test, expect } from "@playwright/test";
+import { DatabaseSync } from "node:sqlite";
+function inspectData(callback, writable = false) {
+  const path = process.env.LEAFIVO_E2E_DB;
+  if (!path) throw new Error("Isolated browser database path is missing.");
+  const db = new DatabaseSync(path, { readOnly: !writable });
+  try {
+    return callback(db);
+  } finally {
+    db.close();
+  }
+}
 
 const adminToken = "leafivo-e2e-only-owner-token-not-for-production";
 const ownerHeaders = { Authorization: `Bearer ${adminToken}` };
@@ -152,15 +163,19 @@ test("preview checkout saves an unpaid sample order and clears the bag", async (
       "Your sample order has been saved. No payment was taken and no products will be delivered.",
     ),
   ).toBeVisible();
-  const response = await request.get("/api/admin/overview", {
-    headers: ownerHeaders,
-  });
-  expect(response.ok()).toBeTruthy();
-  const overview = await response.json();
-  const order = overview.orders.find((order) => order.email === email);
+  const order = inspectData((db) =>
+    db.prepare("SELECT status,total FROM orders WHERE email=?").get(email),
+  );
   expect(order.status).toBe("preview");
   expect(order.total).toBe(2400);
-  expect(overview.stats.paidOrders).toBe(0);
+  expect(
+    inspectData(
+      (db) =>
+        db
+          .prepare("SELECT count(*) AS count FROM orders WHERE status='paid'")
+          .get().count,
+    ),
+  ).toBe(0);
   await page.keyboard.press("Escape");
   await expect(
     page.getByRole("button", { name: "Open shopping bag, 0 items" }),
@@ -182,92 +197,42 @@ test("newsletter requires consent and persists the signup", async ({
       .getByRole("status")
       .filter({ hasText: "Your interest has been saved" }),
   ).toBeVisible();
-  const overview = await (
-    await request.get("/api/admin/overview", { headers: ownerHeaders })
-  ).json();
   expect(
-    overview.subscribers.some((subscriber) => subscriber.email === email),
-  ).toBeTruthy();
+    inspectData((db) =>
+      Boolean(
+        db.prepare("SELECT email FROM subscribers WHERE email=?").get(email),
+      ),
+    ),
+  ).toBe(true);
   await expect(
     page.getByRole("checkbox", { name: /I agree to receive/ }),
   ).not.toBeChecked();
 });
 
-test("owner authentication protects catalog creation, editing, and removal", async ({
-  page,
+test("production management refuses legacy bearer access when secure owner login is not configured", async ({
+  request,
 }) => {
-  await page.getByRole("button", { name: "Store studio" }).click();
-  await page
-    .getByRole("button", { name: "Product catalog", exact: true })
-    .click();
-  await page.getByLabel("Admin access key").fill("incorrect-key");
-  await page.getByRole("button", { name: "Open your dashboard" }).click();
-  await expect(page.getByRole("alert")).toContainText(
-    "valid store management token",
-  );
-  await page.getByLabel("Admin access key").fill(adminToken);
-  await page.getByRole("button", { name: "Open your dashboard" }).click();
-  await expect(
-    page.getByRole("heading", { name: "Recent orders" }),
-  ).toBeVisible();
-  await page
-    .getByRole("button", { name: "Product catalog", exact: true })
-    .click();
-  await page.getByRole("button", { name: "Add a product" }).click();
-  const editor = page.getByRole("dialog", { name: "Edit product" });
-  await editor
-    .getByLabel("Product title", { exact: true })
-    .fill("Browser Test Workbook");
-  await editor
-    .getByLabel("Short subtitle", { exact: true })
-    .fill("A sample created in an isolated test database.");
-  await editor
-    .getByLabel("Description", { exact: true })
-    .fill(
-      "This listing demonstrates owner catalog creation without modifying the real store database.",
-    );
-  await editor.getByLabel("Price (USD)", { exact: true }).fill("27.50");
-  await editor.getByRole("button", { name: "Save product" }).click();
-  await expect(editor).not.toBeVisible();
-  let listing = page
-    .locator(".admin-product")
-    .filter({
-      has: page.getByRole("heading", {
-        name: "Browser Test Workbook",
-        exact: true,
-      }),
-    });
-  await expect(listing.getByText("$27.50", { exact: true })).toBeVisible();
-  await listing.getByRole("button", { name: "Edit product" }).click();
-  await page
-    .getByRole("dialog", { name: "Edit product" })
-    .getByLabel("Product title", { exact: true })
-    .fill("Updated Browser Workbook");
-  await page
-    .getByRole("dialog")
-    .getByRole("button", { name: "Save product" })
-    .click();
-  await expect(
-    page.getByRole("heading", {
-      name: "Updated Browser Workbook",
-      exact: true,
-    }),
-  ).toBeVisible();
-  await page
-    .getByRole("button", { name: "Delete Updated Browser Workbook" })
-    .click();
-  await page
-    .getByRole("dialog", { name: "Delete product" })
-    .getByRole("button", { name: "Remove listing" })
-    .click();
-  await expect(
-    page.getByRole("heading", {
-      name: "Updated Browser Workbook",
-      exact: true,
-    }),
-  ).toHaveCount(0);
-  await page.getByRole("button", { name: "Sign out" }).click();
-  await expect(page.getByLabel("Admin access key")).toBeVisible();
+  expect(
+    (
+      await request.get("/api/admin/overview", { headers: ownerHeaders })
+    ).status(),
+  ).toBe(503);
+  expect(
+    (
+      await request.post("/api/admin/products", {
+        headers: { ...ownerHeaders, Origin: "http://127.0.0.1:3101" },
+        data: {
+          title: "Must not be created",
+          description: "Unauthorized production write",
+        },
+      })
+    ).status(),
+  ).toBe(503);
+  expect(
+    inspectData(
+      (db) => db.prepare("SELECT count(*) AS count FROM products").get().count,
+    ),
+  ).toBe(6);
 });
 
 test("launch kit produces platform-specific drafts and a downloadable PNG", async ({
@@ -349,12 +314,15 @@ test("mobile navigation, product details, and bag fit a narrow screen", async ({
   ).toBeVisible();
 });
 
-
-test("production responses enforce script, frame, and referrer restrictions", async ({ page }) => {
+test("production responses enforce script, frame, and referrer restrictions", async ({
+  page,
+}) => {
   const response = await page.goto("/");
   const headers = response.headers();
   expect(headers["content-security-policy"]).toContain("script-src 'self'");
-  expect(headers["content-security-policy"]).toContain("frame-ancestors 'none'");
+  expect(headers["content-security-policy"]).toContain(
+    "frame-ancestors 'none'",
+  );
   expect(headers["content-security-policy"]).not.toContain("'unsafe-inline'");
   expect(headers["content-security-policy"]).not.toContain("'unsafe-eval'");
   expect(headers["x-frame-options"]).toBe("DENY");
@@ -363,96 +331,180 @@ test("production responses enforce script, frame, and referrer restrictions", as
   await expect(page.locator(".product-card")).toHaveCount(6);
 });
 
-test("paid receipt uses an authorization header without leaking its capability", async ({ page }) => {
+test("paid receipt uses an authorization header without leaking its capability", async ({
+  page,
+}) => {
   const token = "test-only-receipt-capability-not-a-real-secret";
   const orderId = "security-paid-order";
   const requests = [];
   const observedUrls = [];
   page.on("request", (request) => observedUrls.push(request.url()));
   await page.route(`**/api/orders/${orderId}`, async (route) => {
-    requests.push({ url: route.request().url(), headers: route.request().headers() });
+    requests.push({
+      url: route.request().url(),
+      headers: route.request().headers(),
+    });
     await route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
-        id: orderId, status: "paid", total: 2400, currency: "usd",
-        items: [{ productId: "the-art-of-starting", title: "The Art of Starting", quantity: 1, price: 2400,
-          downloadUrl: `/api/downloads/${orderId}/the-art-of-starting?expires=9999999999999&signature=test-only-signature` }],
+        id: orderId,
+        status: "paid",
+        total: 2400,
+        currency: "usd",
+        items: [
+          {
+            productId: "the-art-of-starting",
+            title: "The Art of Starting",
+            quantity: 1,
+            price: 2400,
+            downloadUrl: `/api/downloads/${orderId}/the-art-of-starting?expires=9999999999999&signature=test-only-signature`,
+          },
+        ],
       }),
     });
   });
   await page.goto(`/?checkout=success#receipt?order=${orderId}&token=${token}`);
-  const receipt = page.getByRole("dialog", { name: "Payment status and downloads" });
-  await expect(receipt.getByText("PAYMENT CONFIRMED", { exact: true })).toBeVisible();
-  await expect(receipt.getByRole("link", { name: "Download", exact: true })).toHaveAttribute("href", /\/api\/downloads\/security-paid-order\//);
+  const receipt = page.getByRole("dialog", {
+    name: "Payment status and downloads",
+  });
+  await expect(
+    receipt.getByText("PAYMENT CONFIRMED", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    receipt.getByRole("link", { name: "Download", exact: true }),
+  ).toHaveAttribute("href", /\/api\/downloads\/security-paid-order\//);
   await expect(page).toHaveURL("http://127.0.0.1:3101/");
   expect(requests).toHaveLength(1);
   expect(new URL(requests[0].url).search).toBe("");
   expect(requests[0].headers.authorization).toBe(`Bearer ${token}`);
-  expect(observedUrls.some(url => url.includes(token))).toBe(false);
+  expect(observedUrls.some((url) => url.includes(token))).toBe(false);
   expect(await page.locator("body").textContent()).not.toContain(token);
-  expect(await page.evaluate((capability) => {
-    const values = [...Object.values(localStorage), ...Object.values(sessionStorage)];
-    return values.some(value => value.includes(capability));
-  }, token)).toBe(false);
+  expect(
+    await page.evaluate((capability) => {
+      const values = [
+        ...Object.values(localStorage),
+        ...Object.values(sessionStorage),
+      ];
+      return values.some((value) => value.includes(capability));
+    }, token),
+  ).toBe(false);
 });
 
-test("refunded receipt shows revoked access and offers no download", async ({ page }) => {
+test("refunded receipt shows revoked access and offers no download", async ({
+  page,
+}) => {
   const orderId = "security-refunded-order";
-  await page.route(`**/api/orders/${orderId}`, route => route.fulfill({
-    status: 200, contentType: "application/json",
-    body: JSON.stringify({ id: orderId, status: "refunded", total: 2400, currency: "usd", items: [
-      { productId: "the-art-of-starting", title: "The Art of Starting", quantity: 1, price: 2400 },
-    ] }),
-  }));
-  await page.goto(`/?checkout=success#receipt?order=${orderId}&token=test-only-refunded-capability`);
-  const receipt = page.getByRole("dialog", { name: "Payment status and downloads" });
-  await expect(receipt.getByText(/This order has been refunded or disputed/)).toBeVisible();
-  await expect(receipt.getByText("DOWNLOAD ACCESS ON HOLD", { exact: true })).toBeVisible();
-  await expect(receipt.getByRole("heading", { name: "Access on hold.", exact: true })).toBeVisible();
-  await expect(receipt.getByRole("link", { name: "Download", exact: true })).toHaveCount(0);
-  await expect(receipt.getByText("PAYMENT CONFIRMED", { exact: true })).toHaveCount(0);
-  await expect(receipt.getByText("CHECKING YOUR PAYMENT", { exact: true })).toHaveCount(0);
-  await expect(receipt.getByRole("heading", { name: "Almost there.", exact: true })).toHaveCount(0);
+  await page.route(`**/api/orders/${orderId}`, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        id: orderId,
+        status: "refunded",
+        total: 2400,
+        currency: "usd",
+        items: [
+          {
+            productId: "the-art-of-starting",
+            title: "The Art of Starting",
+            quantity: 1,
+            price: 2400,
+          },
+        ],
+      }),
+    }),
+  );
+  await page.goto(
+    `/?checkout=success#receipt?order=${orderId}&token=test-only-refunded-capability`,
+  );
+  const receipt = page.getByRole("dialog", {
+    name: "Payment status and downloads",
+  });
+  await expect(
+    receipt.getByText(/This order has been refunded or disputed/),
+  ).toBeVisible();
+  await expect(
+    receipt.getByText("DOWNLOAD ACCESS ON HOLD", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    receipt.getByRole("heading", { name: "Access on hold.", exact: true }),
+  ).toBeVisible();
+  await expect(
+    receipt.getByRole("link", { name: "Download", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    receipt.getByText("PAYMENT CONFIRMED", { exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    receipt.getByText("CHECKING YOUR PAYMENT", { exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    receipt.getByRole("heading", { name: "Almost there.", exact: true }),
+  ).toHaveCount(0);
 });
 
-test("corrupted browser storage does not crash the store or create bag items", async ({ page }) => {
+test("corrupted browser storage does not crash the store or create bag items", async ({
+  page,
+}) => {
   await page.evaluate(() => {
     localStorage.setItem("chapter.cart", "[null]");
-    localStorage.setItem("chapter.favorites", '[null,{},123]');
+    localStorage.setItem("chapter.favorites", "[null,{},123]");
   });
   await page.reload();
   await expect(page.locator(".product-card")).toHaveCount(6);
-  await page.getByRole("button", { name: "Open shopping bag, 0 items" }).click();
+  await page
+    .getByRole("button", { name: "Open shopping bag, 0 items" })
+    .click();
   await expect(page.getByText("Your next idea is out there.")).toBeVisible();
   await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "Saved", exact: true }).click();
   await expect(page.locator(".product-card")).toHaveCount(0);
-  await expect(page.getByText("A place for your next favorites.")).toBeVisible();
+  await expect(
+    page.getByText("A place for your next favorites."),
+  ).toBeVisible();
 });
 
-test("stored product markup renders as text without executing or creating HTML", async ({ page, request }) => {
+test("stored product markup renders as text without executing or creating HTML", async ({
+  page,
+  request,
+}) => {
   const title = '<img src=x onerror="window.__leafivoXss=1">';
-  const description = '<script>window.__leafivoXss=2</script> Sample text, not executable HTML.';
-  const response = await request.post("/api/admin/products", {
-    headers: { ...ownerHeaders, Origin: "http://127.0.0.1:3101" },
-    data: { title, description, subtitle: "A stored markup escaping test.", sample: true },
-  });
-  expect(response.status()).toBe(201);
-  const product = await response.json();
+  const description =
+    "<script>window.__leafivoXss=2</script> Sample text, not executable HTML.";
+  const seed = inspectData((db) =>
+    JSON.parse(db.prepare("SELECT data FROM products LIMIT 1").get().data),
+  );
+  const product = {
+    ...seed,
+    id: "test-stored-markup-browser",
+    title,
+    description,
+    subtitle: "A stored markup escaping test.",
+    sample: true,
+  };
+  inspectData(
+    (db) =>
+      db
+        .prepare("INSERT INTO products(id,data) VALUES (?,?)")
+        .run(product.id, JSON.stringify(product)),
+    true,
+  );
   try {
     await page.reload();
     await expect(page.locator(".product-card")).toHaveCount(7);
     await page.getByRole("button", { name: title, exact: true }).click();
     const dialog = page.getByRole("dialog", { name: title, exact: true });
-    await expect(dialog.getByRole("heading", { name: title, exact: true })).toBeVisible();
+    await expect(
+      dialog.getByRole("heading", { name: title, exact: true }),
+    ).toBeVisible();
     await expect(dialog.getByText(description, { exact: true })).toBeVisible();
     await expect(dialog.locator("img, script")).toHaveCount(0);
     expect(await page.evaluate(() => window.__leafivoXss)).toBeUndefined();
   } finally {
-    const deletion = await request.delete(`/api/admin/products/${product.id}`, {
-      headers: { ...ownerHeaders, Origin: "http://127.0.0.1:3101" },
-    });
-    expect(deletion.ok()).toBeTruthy();
+    inspectData(
+      (db) => db.prepare("DELETE FROM products WHERE id=?").run(product.id),
+      true,
+    );
   }
 });

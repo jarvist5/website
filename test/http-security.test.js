@@ -132,7 +132,9 @@ test("cross-site authenticated writes are blocked without removing owner authent
     (await call("/api/products/the-art-of-starting")).body.title,
     "The Art of Starting",
   );
-  assert.equal((await call("/api/admin/overview")).status, 401);
+  const unavailable = await call("/api/admin/overview");
+  assert.equal(unavailable.status, 503);
+  assert.match(unavailable.body.error, /Secure owner sign-in/);
 });
 
 test("private server paths and encoded dotfiles never fall back to the public app", async (t) => {

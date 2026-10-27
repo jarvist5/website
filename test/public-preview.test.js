@@ -156,7 +156,10 @@ test("public preview and live payments cannot be combined or create a database",
 });
 
 test("private local preview retains authenticated management and persisted practice orders", async (t) => {
-  const { app, call } = await fixture(t, { publicPreview: false });
+  const { app, call } = await fixture(t, {
+    publicPreview: false,
+    production: false,
+  });
   assert.equal((await call("/api/store")).body.publicPreview, false);
   assert.equal(
     (

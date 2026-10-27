@@ -83,7 +83,20 @@ export function protectBrowserMutations(configuredOrigin) {
       return res
         .status(403)
         .json({ error: "Cross-site requests are not permitted." });
-    if (req.method !== "DELETE" && !req.is("application/json"))
+    const privateUpload =
+      req.method === "PUT" &&
+      /^\/api\/admin\/products\/[^/]+\/file$/.test(req.path) &&
+      [
+        "application/pdf",
+        "application/epub+zip",
+        "application/zip",
+        "application/octet-stream",
+      ].some((type) => req.is(type));
+    if (
+      req.method !== "DELETE" &&
+      !req.is("application/json") &&
+      !privateUpload
+    )
       return res
         .status(415)
         .json({ error: "Send this request as application/json." });

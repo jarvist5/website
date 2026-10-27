@@ -2,7 +2,7 @@
 
 The deployment files prepare a public **inspection preview**, using sample products and no real payments. A successful local build is not a published website. The live service URL is only established after the hosting provider creates a service and the deployed site passes its checks.
 
-The preview is designed for browsing, product details, search, favorites, bag controls, a non-persistent sample checkout, and draft social assets. With `PUBLIC_PREVIEW=true`, newsletter collection and owner APIs are disabled, checkout collects no email, and sample orders/customer information are not persisted. Keep both `STORE_MODE=preview` and `PUBLIC_PREVIEW=true` while inspecting the site.
+The preview is designed for browsing, product details, search, favorites, bag controls, a non-persistent sample checkout, and draft social assets. With `PUBLIC_PREVIEW=true`, newsletter collection and owner APIs are disabled by default, checkout collects no email, and sample orders/customer information are not persisted. Keep both `STORE_MODE=preview` and `PUBLIC_PREVIEW=true` while inspecting the site.
 
 ## Render preview
 
@@ -30,7 +30,7 @@ npm run deploy:render
 
 It requires a secure `RENDER_API_KEY` binding for `api.render.com`, and a clean committed/pushed `codex/leafivo-public-preview` branch. If the connection has several workspaces, select the intended one with `RENDER_OWNER_ID`; it never guesses a workspace. It creates only the named free preview with no paid disk, refuses unrelated or paid services, and reuses the same existing deployment when safe. Status is saved without credentials in `.data/render-deployment.json`. A provider-reported live status still requires the public checks below. Rerunning while a build is in progress checks that build instead of creating another service.
 
-The real command was exercised without a key and stopped before making any external request. No Render service or public website URL has been created in this session. Enter keys only through secure environment settings, never through chat. The environment draft includes a `RENDER_API_KEY` requirement; adding that requirement does not supply its value or apply the connection. Review/save the relevant environment settings and publish the environment configuration when prompted.
+The free service is deployed at **https://leafivo-preview.onrender.com** and its public preview workflows have passed HTTPS and browser checks. Deployment records are saved locally in `.data/render-deployment.json`; verify its commit and application-validation status after each update. Enter keys only through secure environment settings, never through chat. The environment draft includes a `RENDER_API_KEY` requirement; adding that requirement does not supply its value or apply the connection. Review/save the relevant environment settings and publish the environment configuration when prompted.
 
 ## Local production container
 
@@ -49,14 +49,14 @@ For internal validation, make a request to the mapped health endpoint and homepa
 
 The Docker production build passed in this workspace. A temporary container then passed functional checks as UID 1000 with a read-only root filesystem and writable, restricted private directories: homepage and CSP, six sample listings, non-persistent checkout without email, disabled signup/owner APIs, private-path denial, and zero saved orders or subscribers. The runtime contained neither local `.env` files, the optional build trust file, nor Vite development tooling. The temporary container was removed after validation.
 
-These checks validate the container, not a public hosting service. The assigned Render domain, TLS and the actual deployed site still need verification after service creation.
+These container checks are separate from the public deployment checks. Repeat public HTTPS and browser validation for each new deployed commit before declaring the update ready.
 
 ## Check the actual public deployment
 
 - The homepage responds over HTTPS, shows Leafivo and clearly labels the sample/preview status.
 - Product details, category filters, search, favorites, cart updates and mobile navigation work.
 - Sample checkout does not ask for an email, take a payment or persist customer/order information.
-- Newsletter signup is unavailable and does not store an address. Owner APIs are unavailable in public-preview mode.
+- Newsletter signup is unavailable and does not store an address. Owner APIs are unavailable in the default free configuration. Secure owner access can be separately enabled only after permanent storage is provisioned and verified; see [owner setup](OWNER-SETUP.md).
 - The health API reports preview mode and public preview. No payment provider is connected.
 - Production CSP, anti-framing, no-referrer and other security headers are present; browser checks show no unexpected script or CSP errors.
 - Requests for `/.env`, `/.data/store.sqlite`, `/server/index.js` and `/private-downloads/` do not disclose private content.
@@ -66,6 +66,6 @@ Use the actual Render URL supplied by Render. Do not advertise an invented domai
 
 ## Before real business operations
 
-The free preview configuration is deliberately limited. Real sales need the owner's real products, completed business policies and contact details, a provider approved for the Pakistan-based business and tested integration, reliable delivery/recovery, stronger owner authentication, and protected persistent customer/order storage. Approve any hosting budget before moving to a paid plan or persistent disk. A managed database requires an application adapter; this application currently uses SQLite.
+The free preview configuration is deliberately limited. Real sales need the owner's real products, completed business policies and contact details, a provider approved for the Pakistan-based business and tested integration, reliable delivery/recovery, private activation of the implemented password-and-authenticator owner account, and protected persistent customer/order storage. Approve any hosting budget before moving to a paid plan or persistent disk. A managed database requires an application adapter; this application currently uses SQLite.
 
 Do not merely switch the free preview to live payments. Follow [the go-live checklist](GO-LIVE.md) and [security review](SECURITY.md), test real-provider behavior on the final host, and validate backups/restoration. For a persistent Node/SQLite service, mount private storage outside the public web root and set `DATABASE_PATH` and `DOWNLOAD_DIR` to those secured paths. Images do not contain paid product files; provision owned files separately through the authorized host storage workflow.

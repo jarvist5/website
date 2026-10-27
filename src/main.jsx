@@ -29,6 +29,7 @@ import {
 } from "lucide-react";
 import "@fontsource-variable/dm-sans";
 import "./styles.css";
+import OwnerAccess, { OwnerSecurity } from "./OwnerAccess.jsx";
 
 const money = (cents, currency = "usd") =>
   new Intl.NumberFormat("en-US", {
@@ -52,6 +53,7 @@ const safeSave = (key, value) => {
 };
 async function api(path, options = {}) {
   const response = await fetch(path, {
+    credentials: "same-origin",
     ...options,
     headers: { "Content-Type": "application/json", ...options.headers },
   });
@@ -61,13 +63,16 @@ async function api(path, options = {}) {
   } catch {
     throw new Error("The store could not be reached. Please try again.");
   }
-  if (!response.ok)
-    throw new Error(
+  if (!response.ok) {
+    const error = new Error(
       data.error?.message ||
         data.error ||
         data.message ||
         "Something went wrong. Please try again.",
     );
+    error.status = response.status;
+    throw error;
+  }
   return data;
 }
 
@@ -198,7 +203,9 @@ function App() {
     [toast, setToast] = useState("");
   const [searchOpen, setSearchOpen] = useState(false),
     [mobileMenu, setMobileMenu] = useState(false),
-    [studio, setStudio] = useState(location.hash === "#studio");
+    [studio, setStudio] = useState(
+      location.hash === "#studio" || location.hash.startsWith("#owner"),
+    );
   const [email, setEmail] = useState(""),
     [consent, setConsent] = useState(false),
     [newsletterStatus, setNewsletterStatus] = useState(""),
@@ -217,7 +224,10 @@ function App() {
       .catch((e) => setError(e.message));
   useEffect(() => {
     load();
-    const listener = () => setStudio(location.hash === "#studio");
+    const listener = () =>
+      setStudio(
+        location.hash === "#studio" || location.hash.startsWith("#owner"),
+      );
     window.addEventListener("hashchange", listener);
     return () => window.removeEventListener("hashchange", listener);
   }, []);
@@ -967,6 +977,15 @@ function App() {
               <button onClick={() => setModal("help")}>
                 Questions & answers
               </button>
+              <a
+                href="#owner"
+                onClick={() => {
+                  setStudio(true);
+                  window.scrollTo(0, 0);
+                }}
+              >
+                Owner sign in <ShieldCheck size={12} />
+              </a>
               <button
                 onClick={() => {
                   location.hash = "studio";
@@ -1465,7 +1484,9 @@ function App() {
 }
 
 function Studio({ products, store, onStoreUpdate, notify, onBack }) {
-  const [tab, setTab] = useState("launch"),
+  const [tab, setTab] = useState(
+      location.hash.startsWith("#owner") ? "overview" : "launch",
+    ),
     [token, setToken] = useState(""),
     [auth, setAuth] = useState(""),
     [overview, setOverview] = useState(null),
@@ -1474,42 +1495,115 @@ function Studio({ products, store, onStoreUpdate, notify, onBack }) {
     [editing, setEditing] = useState(null),
     [deleting, setDeleting] = useState(null),
     [draft, setDraft] = useState(null),
+    [uploadFile, setUploadFile] = useState(null),
+    [uploadRights, setUploadRights] = useState(false),
+    [sessionLoading, setSessionLoading] = useState(Boolean(store.ownerAccess)),
+    [ownerLocked, setOwnerLocked] = useState(false),
     [captionEdit, setCaptionEdit] = useState(null),
     [channel, setChannel] = useState("Instagram"),
     [productId, setProductId] = useState(products[0]?.id || "");
+  const clearOwner = () => {
+    setAuth("");
+    setOverview(null);
+    setEditing(null);
+    setDraft(null);
+    setUploadFile(null);
+  };
+  const headers = store.ownerAccess
+    ? { "X-CSRF-Token": auth?.csrfToken || "" }
+    : { Authorization: `Bearer ${auth}` };
+  const refresh = async (secret = auth) => {
+    try {
+      const result = await api("/api/admin/overview", {
+        headers: store.ownerAccess
+          ? { "X-CSRF-Token": secret?.csrfToken || "" }
+          : { Authorization: `Bearer ${secret}` },
+      });
+      setOverview(result);
+    } catch (e) {
+      if (e.status === 401 && store.ownerAccess) clearOwner();
+      throw e;
+    }
+  };
+  const signOut = async () => {
+    try {
+      if (store.ownerAccess && auth)
+        await api("/api/owner/logout", { method: "POST", headers, body: "{}" });
+    } catch (error) {
+      if (error.status !== 401) {
+        setError(
+          "Sign-out could not be confirmed. Check your connection and try again.",
+        );
+        return false;
+      }
+    }
+    clearOwner();
+    return true;
+  };
+  useEffect(() => {
+    const route = () => {
+      if (location.hash.startsWith("#owner")) setTab("overview");
+    };
+    route();
+    window.addEventListener("hashchange", route);
+    return () => window.removeEventListener("hashchange", route);
+  }, []);
+  useEffect(() => {
+    if (!store.ownerAccess) return;
+    let cancelled = false;
+    api("/api/owner/session")
+      .then(async (session) => {
+        if (cancelled) return;
+        if (session.authenticated) {
+          setAuth(session);
+          await refresh(session);
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e.message);
+      })
+      .finally(() => {
+        if (!cancelled) setSessionLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [store.ownerAccess]);
   useEffect(() => {
     if (!auth) return;
     let timer;
-    const logout = () => {
-      setAuth("");
-      setOverview(null);
-      setEditing(null);
-      setDraft(null);
-      notify("Owner access closed. Sign in again to continue.");
-    };
     const reset = () => {
       clearTimeout(timer);
-      timer = setTimeout(logout, 15 * 60 * 1000);
+      timer = setTimeout(
+        async () => {
+          const signedOut = await signOut();
+          if (!signedOut) {
+            setOwnerLocked(true);
+            clearOwner();
+          }
+          notify(
+            signedOut
+              ? "Owner access closed after inactivity. Sign in again to continue."
+              : "Owner screen locked. Server sign-out could not be confirmed. Sign in again when online.",
+          );
+        },
+        15 * 60 * 1000,
+      );
     };
     reset();
     window.addEventListener("pointerdown", reset);
     window.addEventListener("keydown", reset);
-    window.addEventListener("pagehide", logout);
     return () => {
       clearTimeout(timer);
       window.removeEventListener("pointerdown", reset);
       window.removeEventListener("keydown", reset);
-      window.removeEventListener("pagehide", logout);
     };
   }, [auth]);
+  useEffect(() => {
+    setUploadFile(null);
+    setUploadRights(false);
+  }, [editing]);
   const product = products.find((p) => p.id === productId) || products[0];
-  const headers = { Authorization: `Bearer ${auth}` };
-  const refresh = async (secret = auth) => {
-    const result = await api("/api/admin/overview", {
-      headers: { Authorization: `Bearer ${secret}` },
-    });
-    setOverview(result);
-  };
   const login = async (e) => {
     e.preventDefault();
     setBusy(true);
@@ -1545,7 +1639,13 @@ function Studio({ products, store, onStoreUpdate, notify, onBack }) {
           .filter((k) => k in draft)
           .map((k) => [k, draft[k]]),
       );
-      await api(
+      if (uploadFile && !uploadRights)
+        throw new Error(
+          "Confirm that you own or are licensed to distribute this file.",
+        );
+      if (uploadFile && uploadFile.size > 25 * 1024 * 1024)
+        throw new Error("Choose a file no larger than 25 MB.");
+      const saved = await api(
         editing === "new"
           ? "/api/admin/products"
           : `/api/admin/products/${editing}`,
@@ -1554,12 +1654,41 @@ function Studio({ products, store, onStoreUpdate, notify, onBack }) {
           headers,
           body: JSON.stringify({
             ...payload,
+            ...(uploadFile ? { sample: true } : {}),
             price: Math.round(Number(draft.price) * 100),
             pages: Number(draft.pages),
             details: draft.details.split("\n").filter(Boolean),
           }),
         },
       );
+      if (uploadFile) {
+        const format = uploadFile.name.split(".").pop().toLowerCase();
+        const response = await fetch(
+          `/api/admin/products/${encodeURIComponent(saved.id)}/file`,
+          {
+            method: "PUT",
+            credentials: "same-origin",
+            headers: {
+              ...headers,
+              "Content-Type": "application/octet-stream",
+              "X-File-Format": format,
+              "X-Content-Rights": "owned-or-licensed",
+            },
+            body: uploadFile,
+          },
+        );
+        const result = await response.json();
+        if (!response.ok)
+          throw new Error(
+            result.error || "The private file could not be uploaded.",
+          );
+        if (!draft.sample)
+          await api(`/api/admin/products/${saved.id}`, {
+            method: "PUT",
+            headers,
+            body: JSON.stringify({ sample: false }),
+          });
+      }
       await refresh();
       onStoreUpdate();
       setEditing(null);
@@ -1665,6 +1794,9 @@ function Studio({ products, store, onStoreUpdate, notify, onBack }) {
           { id: "overview", icon: LayoutDashboard, label: "Overview" },
           { id: "catalog", icon: Package, label: "Product catalog" },
           { id: "launch", icon: Megaphone, label: "Launch kit" },
+          ...(store.ownerAccess
+            ? [{ id: "security", icon: ShieldCheck, label: "Account security" }]
+            : []),
         ].map((t) => (
           <button
             className={tab === t.id ? "selected" : ""}
@@ -1679,15 +1811,7 @@ function Studio({ products, store, onStoreUpdate, notify, onBack }) {
           </button>
         ))}
         {auth && (
-          <button
-            className="logout-button"
-            onClick={() => {
-              setAuth("");
-              setOverview(null);
-              setEditing(null);
-              setDraft(null);
-            }}
-          >
+          <button className="logout-button" onClick={signOut}>
             <LogOut size={16} />
             Sign out
           </button>
@@ -1821,7 +1945,25 @@ function Studio({ products, store, onStoreUpdate, notify, onBack }) {
             </ol>
           </div>
         </>
-      ) : store.publicPreview ? (
+      ) : store.ownerAccess && sessionLoading ? (
+        <div className="admin-login studio-card">
+          <LoaderCircle className="spin" size={25} />
+          <p>Checking your owner session…</p>
+        </div>
+      ) : store.ownerAccess && !auth ? (
+        <OwnerAccess
+          requireFreshLogin={ownerLocked}
+          onAuthenticated={(session) => {
+            setOwnerLocked(false);
+            setError("");
+            setAuth(session);
+            setTab("overview");
+            refresh(session).catch((e) => setError(e.message));
+          }}
+          onBack={onBack}
+          notify={notify}
+        />
+      ) : store.publicPreview && !store.ownerAccess ? (
         <div className="admin-login studio-card">
           <ShieldCheck size={32} />
           <h2>A first look, just for you.</h2>
@@ -1874,6 +2016,13 @@ function Studio({ products, store, onStoreUpdate, notify, onBack }) {
             Never share this key or use it in social posts.
           </p>
         </div>
+      ) : tab === "security" && store.ownerAccess ? (
+        <OwnerSecurity
+          session={auth}
+          onSessionUpdate={setAuth}
+          onLogout={clearOwner}
+          notify={notify}
+        />
       ) : tab === "overview" ? (
         <>
           <div className="stats-grid">
@@ -2170,20 +2319,64 @@ function Studio({ products, store, onStoreUpdate, notify, onBack }) {
                 }
               />
             </label>
-            <label className="field-label">
-              Private download filename (optional)
-              <input
-                className="text-input"
-                placeholder="my-ebook.pdf"
-                onChange={(e) =>
-                  setDraft({ ...draft, downloadFile: e.target.value || null })
-                }
-              />
-              <span className="small-note">
-                Place the owned file in the server’s private downloads directory
-                first. Never put it in public/.
-              </span>
-            </label>
+            {store.ownerAccess ? (
+              <div className="owner-file-upload">
+                <label className="field-label" htmlFor="owner-product-file">
+                  Private ebook or product file
+                  <input
+                    id="owner-product-file"
+                    className="text-input"
+                    type="file"
+                    accept=".pdf,.epub,.zip"
+                    onChange={(e) => setUploadFile(e.target.files?.[0] || null)}
+                  />
+                </label>
+                <p className="small-note">
+                  PDF, EPUB or ZIP · up to 25 MB. Files stay private. Header
+                  checks do not replace checking your files for malware.
+                </p>
+                {draft.downloadReady && editing !== "new" && (
+                  <a
+                    className="text-link"
+                    href={`/api/admin/products/${editing}/file`}
+                    download
+                  >
+                    Review current private file <Download size={15} />
+                  </a>
+                )}
+                {uploadFile && (
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={uploadRights}
+                      onChange={(e) => setUploadRights(e.target.checked)}
+                      required
+                    />
+                    I own this content or have permission to distribute it.
+                  </label>
+                )}
+              </div>
+            ) : (
+              <>
+                <label className="field-label">
+                  Private download filename (optional)
+                  <input
+                    className="text-input"
+                    placeholder="my-ebook.pdf"
+                    onChange={(e) =>
+                      setDraft({
+                        ...draft,
+                        downloadFile: e.target.value || null,
+                      })
+                    }
+                  />
+                  <span className="small-note">
+                    Place the owned file in the server’s private downloads
+                    directory first. Never put it in public/.
+                  </span>
+                </label>
+              </>
+            )}
             <label className="checkbox-label">
               <input
                 type="checkbox"

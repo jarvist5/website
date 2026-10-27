@@ -20,6 +20,8 @@ import {
   assertPrivateStoragePaths,
 } from "./security.js";
 import { handlePaymentEvent } from "./payment-events.js";
+import { createOwnerAuth } from "./owner-auth.js";
+import { createProductFileHandler } from "./product-files.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -38,6 +40,18 @@ const secureEqual = (a, b) => {
 };
 
 export function createApp(options = {}) {
+  const production =
+    options.production ?? process.env.NODE_ENV === "production";
+  const ownerEnabled =
+    options.ownerManagementEnabled ??
+    process.env.OWNER_MANAGEMENT_ENABLED === "true";
+  const ownerStoragePersistent =
+    options.ownerStoragePersistent ??
+    process.env.OWNER_STORAGE_PERSISTENT === "true";
+  if (ownerEnabled && production && !ownerStoragePersistent)
+    throw new Error(
+      "Production owner access requires verified permanent storage.",
+    );
   const mode = options.mode ?? process.env.STORE_MODE ?? "preview";
   const publicPreview =
     options.publicPreview ?? process.env.PUBLIC_PREVIEW === "true";
@@ -74,9 +88,36 @@ export function createApp(options = {}) {
       ? new Stripe(stripeSecretKey, { timeout: 20000, maxNetworkRetries: 1 })
       : null);
   const app = express();
-  const production =
-    options.production ?? process.env.NODE_ENV === "production";
   const origin = publicOrigin(baseUrl);
+  const downloadSigningKey =
+    options.downloadSigningKey ??
+    process.env.DOWNLOAD_SIGNING_KEY ??
+    adminToken;
+  const ownerAuth = ownerEnabled
+    ? createOwnerAuth({
+        db: store.db,
+        production,
+        origin: origin || "",
+        setupToken:
+          options.ownerSetupToken ?? process.env.OWNER_SETUP_TOKEN ?? "",
+        setupExpires:
+          options.ownerSetupExpires ?? process.env.OWNER_SETUP_EXPIRES ?? "",
+        sessionKey: options.ownerAuthKey ?? process.env.OWNER_AUTH_KEY ?? "",
+      })
+    : null;
+  if (ownerEnabled)
+    store.db
+      .prepare(
+        "INSERT OR IGNORE INTO metadata(key,value) VALUES('owner_storage_identity',?)",
+      )
+      .run(randomUUID());
+  const storageIdentity = ownerEnabled
+    ? store.db
+        .prepare(
+          "SELECT value FROM metadata WHERE key='owner_storage_identity'",
+        )
+        .get().value
+    : undefined;
   app.disable("x-powered-by");
   const proxyHops = Number(
     options.trustProxyHops ?? process.env.TRUST_PROXY_HOPS ?? 0,
@@ -90,7 +131,9 @@ export function createApp(options = {}) {
     Boolean(
       stripe &&
       webhookSecret &&
-      adminToken.length >= 24 &&
+      (production
+        ? ownerAuth?.status().configured && downloadSigningKey.length >= 32
+        : adminToken.length >= 24) &&
       origin &&
       origin.startsWith("https://"),
     );
@@ -123,11 +166,16 @@ export function createApp(options = {}) {
       next();
     };
   const admin = (req, res, next) => {
+    if (ownerAuth) return ownerAuth.middleware.requireOwner(req, res, next);
     if (publicPreview)
+      return res.status(403).json({
+        error: "Owner management is disabled in this public preview.",
+      });
+    if (production)
       return res
-        .status(403)
+        .status(503)
         .json({
-          error: "Owner management is disabled in this public preview.",
+          error: "Secure owner sign-in is required for store management.",
         });
     if (!adminToken || adminToken.length < 24)
       return res.status(503).json({
@@ -168,7 +216,7 @@ export function createApp(options = {}) {
     return realFile;
   };
   const downloadSignature = (orderId, productId, expiry) =>
-    createHmac("sha256", adminToken)
+    createHmac("sha256", downloadSigningKey)
       .update(`${orderId}:${productId}:${expiry}`)
       .digest("hex");
   const productFields = new Set([
@@ -252,12 +300,59 @@ export function createApp(options = {}) {
     },
   );
   app.use(express.json({ limit: "24kb" }));
+  if (ownerAuth) app.use("/api/owner", ownerAuth.router);
+  else {
+    app.get("/api/owner/session", (req, res) =>
+      res.json({
+        authenticated: false,
+        configured: false,
+        setupAvailable: false,
+        enabled: false,
+      }),
+    );
+    app.use("/api/owner", (req, res) =>
+      res.status(503).json({ error: "Owner access is not enabled yet." }),
+    );
+  }
+  app.put(
+    "/api/admin/products/:id/file",
+    limited("admin", 60),
+    admin,
+    express.raw({
+      type: [
+        "application/pdf",
+        "application/epub+zip",
+        "application/zip",
+        "application/octet-stream",
+      ],
+      limit: "25mb",
+    }),
+    createProductFileHandler({ store, downloadDir }),
+  );
+  app.get(
+    "/api/admin/products/:id/file",
+    limited("admin", 60),
+    admin,
+    (req, res) => {
+      const product = store.product(req.params.id);
+      const file = product && privateFile(product.downloadFile);
+      if (!file)
+        return res
+          .status(404)
+          .json({ error: "No private file is available for this product." });
+      res.download(file, `${product.id}${extname(file)}`);
+    },
+  );
 
   app.get("/api/health", (req, res) =>
     res.json({
       status: "ok",
       mode,
       publicPreview,
+      ownerAccess: ownerEnabled,
+      ...(req.path === "/api/health"
+        ? { storagePersistent: ownerStoragePersistent, storageIdentity }
+        : {}),
       checkoutEnabled: mode === "preview" || liveConfigured,
     }),
   );
@@ -267,6 +362,10 @@ export function createApp(options = {}) {
       currency: "usd",
       mode,
       publicPreview,
+      ownerAccess: ownerEnabled,
+      ...(req.path === "/api/health"
+        ? { storagePersistent: ownerStoragePersistent, storageIdentity }
+        : {}),
       checkoutEnabled: mode === "preview" || liveConfigured,
       products: store.products().map(publicProduct),
     }),
@@ -278,12 +377,10 @@ export function createApp(options = {}) {
   });
   app.post("/api/newsletter", limited("newsletter", 10), (req, res) => {
     if (publicPreview)
-      return res
-        .status(503)
-        .json({
-          error:
-            "Email signup is not available in this public preview. No email address has been saved.",
-        });
+      return res.status(503).json({
+        error:
+          "Email signup is not available in this public preview. No email address has been saved.",
+      });
     const email =
       typeof req.body?.email === "string"
         ? req.body.email.trim().toLowerCase()
@@ -475,7 +572,7 @@ export function createApp(options = {}) {
           .json({ error: "Download unavailable in this public preview." });
       const expiry = Number(req.query.expires);
       if (
-        !adminToken ||
+        !downloadSigningKey ||
         !Number.isSafeInteger(expiry) ||
         expiry < Date.now() ||
         expiry > Date.now() + 60 * 60 * 1000 + 1000 ||
@@ -508,6 +605,10 @@ export function createApp(options = {}) {
       products: store.products().map(publicProduct),
       mode,
       publicPreview,
+      ownerAccess: ownerEnabled,
+      ...(req.path === "/api/health"
+        ? { storagePersistent: ownerStoragePersistent, storageIdentity }
+        : {}),
       checkoutEnabled: mode === "preview" || liveConfigured,
     });
   });

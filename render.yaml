@@ -19,6 +19,10 @@ services:
         value: preview
       - key: PUBLIC_PREVIEW
         value: "true"
+      - key: OWNER_MANAGEMENT_ENABLED
+        value: "false"
+      - key: OWNER_STORAGE_PERSISTENT
+        value: "false"
       - key: DATABASE_PATH
         value: /app/.data/store.sqlite
       - key: DOWNLOAD_DIR

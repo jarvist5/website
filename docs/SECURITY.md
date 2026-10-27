@@ -1,6 +1,6 @@
 # Security review and launch controls
 
-Review date: **2026-10-26**. Scope: this application's source, dependency audit, and local automated checks. This is not an independent penetration test, a review of a deployed host, a guarantee against attacks, or a legal certification.
+Review date: **2026-10-27**. Scope: this application's source, dependency audit, and local automated checks. This is not an independent penetration test, a review of a deployed host, a guarantee against attacks, or a legal certification.
 
 ## Implemented and locally tested controls
 
@@ -12,7 +12,9 @@ The local source review and automated regression tests verify the following beha
 - Prices come from the server catalog. A payment redirect never proves payment; only a verified, matching payment event unlocks a purchase.
 - Receipt capabilities move in a return-URL fragment, then an authorization header, rather than query strings. They expire after 24 hours. Signed download links expire after one hour. Tokens are hashed before database storage, including migration of legacy rows. Treat receipt and download capabilities as private credentials; redact authorization headers and signed download query strings in application, proxy, CDN and hosting logs.
 - Verified full refunds and disputes revoke future download access. Access remains revoked until an owner manually reconciles the case; a repeated payment event must not reactivate it. Revocation cannot retrieve files a customer already downloaded.
-- The admin credential stays in browser memory, not local storage. An inactivity timer clears owner data after 15 minutes, and leaving the page clears it too; this does not revoke the server key. Product/customer text is rendered through React as text. No third-party advertising trackers are installed in the preview.
+- Production owner access uses async scrypt password hashing, mandatory TOTP with replay protection, encrypted authenticator secrets, one-use recovery codes and server-revoked HttpOnly cookie sessions. Sessions expire after 15 minutes idle or eight hours maximum, protected writes require Origin and CSRF checks, and the legacy bearer key cannot bypass production authentication. Private activation expires and can create only one owner. Password changes and authenticator recovery revoke existing sessions. Failed network logout is reported; an inactivity screen lock does not pretend to confirm server logout.
+- Owner uploads require authentication and CSRF before body parsing, explicit distribution-rights confirmation, limited PDF/EPUB/ZIP headers, random private filenames, restricted file permissions and storage quotas. Previous files remain for existing orders. These checks are not malware scanning.
+- Product/customer text is rendered through React as text. No third-party advertising trackers are installed in the preview.
 
 ## Evidence and limits
 
@@ -22,8 +24,8 @@ Validation completed locally:
 
 | Check              | Result                         |
 | ------------------ | ------------------------------ |
-| `npm test`         | 58 passed; 0 failures or skips |
-| `npm run test:e2e` | 15 passed; 0 failures or skips |
+| `npm test`         | 90 passed; 0 failures or skips |
+| `npm run test:e2e` | 19 passed; 0 failures or skips |
 | `npm run build`    | Production build passed        |
 | Dependency audit   | 0 known advisories             |
 
@@ -33,7 +35,7 @@ Known operational limits: rate limits are per process and reset on restart; use 
 
 ## Required before real sales
 
-1. **Protect the owner account.** Use a unique, cryptographically random `ADMIN_TOKEN` of at least 24 characters, entered through secure environment configuration. Rotate it after suspected exposure. This starter uses a static bearer key; signing out clears browser state but does not revoke that server key. Put the owner interface/API behind an identity gateway with MFA, or implement equivalent authenticated sessions, before a public launch. Do not put credentials in URLs, Git, screenshots, or social posts.
+1. **Activate the owner account privately.** Use verified permanent storage, a stable `OWNER_AUTH_KEY`, and an expiring one-use activation token. The owner chooses a unique password and enrolls an authenticator locally; save the recovery codes offline. Secure sessions and MFA are implemented, but the live owner account is not active until storage is provisioned and the real owner completes enrollment. No shared default password is supplied. A lost password requires the authorized hosting recovery procedure; email reset is not implemented. Do not put credentials in Git, screenshots or social posts.
 2. **Secure hosting and data.** Run the production server behind verified HTTPS. Set proxy trust only for the real deployment topology. Use restricted OS access and encrypted storage/backups for customer data and private files. Keep credentials outside the public web root, restrict logs, monitor failures, and test restoration. Apply host-level rate/size limits and security updates. Do not expose database files or raw backup archives.
 3. **Verify payments and delivery.** The Pakistan-based owner still needs an approved provider and tested integration. Safepay is a candidate, not an installed option; the optional Stripe path does not establish merchant eligibility. Test payment, failure, cancellation, duplicate events, refund/dispute revocation, and file delivery with the chosen provider. Email receipts, delivery email, and account-based recovery are not implemented; establish a support/recovery process before accepting money.
 4. **Set a data policy.** Identify the operator and privacy contact, explain collection/retention, define an executable deletion process, and decide which records must be retained for legal obligations. Consent-based signups are stored, but email sending and unsubscribe management are not connected. Do not send campaigns until that workflow is complete.
@@ -45,4 +47,6 @@ Restrict affected access, rotate exposed credentials, preserve relevant evidence
 
 ## Public inspection mode
 
-`PUBLIC_PREVIEW=true` is only allowed with `STORE_MODE=preview`. It disables all owner APIs, email signup and delivery, receipt/download capabilities, and practice-order persistence. Practice checkout requires no email, and unsolicited submitted email addresses are not stored. Public preview pages send `X-Robots-Tag: noindex, nofollow`. The bag and favorites still use browser storage, and the hosting provider may retain ordinary request logs. This permits inspecting the sample store while real-business operations remain unfinished.
+`PUBLIC_PREVIEW=true` is only allowed with `STORE_MODE=preview`. It disables email signup and delivery, customer receipt/download capabilities, and practice-order persistence. Owner APIs are disabled unless the separate secure owner feature is explicitly enabled with permanent storage; public visitors cannot claim an account. Practice checkout requires no email, and unsolicited submitted email addresses are not stored. Public preview pages send `X-Robots-Tag: noindex, nofollow`. The bag and favorites still use browser storage, and the hosting provider may retain ordinary request logs. This permits inspecting the sample store while real-business operations remain unfinished.
+
+Owner activation state: the code is implemented and locally tested, with no real owner account created. Hosting-budget approval and actual persistent-volume validation remain prerequisites. The ordinary free public preview remains available. The current storage-cost estimate is not a verified provider quote.
